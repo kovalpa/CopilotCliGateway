@@ -26,6 +26,7 @@ export class WhatsAppChannel implements IChannel {
   private readonly config: WhatsAppConfig;
   private shouldReconnect = true;
   private sentMessageIds = new Set<string>();
+  private static readonly MAX_SENT_IDS = 1000;
 
   constructor(config: WhatsAppConfig) {
     this.config = config;
@@ -55,7 +56,7 @@ export class WhatsAppChannel implements IChannel {
     console.log(`[Gateway] [WhatsApp] Sending message to ${recipientId} (${text.length} chars)`);
     const sent = await this.socket.sendMessage(recipientId, { text });
     if (sent?.key?.id) {
-      this.sentMessageIds.add(sent.key.id);
+      this.trackSentMessage(sent.key.id);
     }
   }
 
@@ -69,7 +70,7 @@ export class WhatsAppChannel implements IChannel {
       caption: caption ?? undefined,
     });
     if (sent?.key?.id) {
-      this.sentMessageIds.add(sent.key.id);
+      this.trackSentMessage(sent.key.id);
     }
   }
 
@@ -83,7 +84,7 @@ export class WhatsAppChannel implements IChannel {
       caption: caption ?? undefined,
     });
     if (sent?.key?.id) {
-      this.sentMessageIds.add(sent.key.id);
+      this.trackSentMessage(sent.key.id);
     }
   }
 
@@ -99,7 +100,7 @@ export class WhatsAppChannel implements IChannel {
       caption: caption ?? undefined,
     });
     if (sent?.key?.id) {
-      this.sentMessageIds.add(sent.key.id);
+      this.trackSentMessage(sent.key.id);
     }
   }
 
@@ -120,6 +121,16 @@ export class WhatsAppChannel implements IChannel {
       await this.socket.sendPresenceUpdate("paused", recipientId);
     } catch (err) {
       // ignore
+    }
+  }
+
+  /** Track sent message IDs and prune old entries to prevent memory leaks. */
+  private trackSentMessage(id: string): void {
+    this.sentMessageIds.add(id);
+    if (this.sentMessageIds.size > WhatsAppChannel.MAX_SENT_IDS) {
+      // Drop the oldest half
+      const ids = [...this.sentMessageIds];
+      this.sentMessageIds = new Set(ids.slice(ids.length / 2));
     }
   }
 
@@ -216,7 +227,8 @@ export class WhatsAppChannel implements IChannel {
 
     if (this.config.allowedNumbers.length > 0) {
       const senderNumber = senderId.replace(/@.*$/, "");
-      if (!this.config.allowedNumbers.includes(senderNumber)) {
+      const allowedNumbers = this.config.allowedNumbers.filter((n) => n.trim());
+      if (allowedNumbers.length > 0 && !allowedNumbers.includes(senderNumber)) {
         console.log(`[Gateway] [WhatsApp] Ignored message from unauthorized number: ${senderNumber}`);
         return;
       }

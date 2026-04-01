@@ -142,13 +142,14 @@ export class TelegramChannel implements IChannel {
   // --------------- Private helpers ---------------
 
   private isAllowed(ctx: Context): boolean {
-    if (this.config.allowedUsers.length === 0) return true;
+    const filteredUsers = this.config.allowedUsers.filter((u) => u.trim());
+    if (filteredUsers.length === 0) return true;
 
     const userId = String(ctx.from?.id ?? "");
     const username = (ctx.from?.username ?? "").toLowerCase();
     const chatId = String(ctx.chat?.id ?? "");
 
-    return this.config.allowedUsers.some((entry) => {
+    return filteredUsers.some((entry) => {
       const normalized = entry.replace(/^@/, "").toLowerCase();
       return normalized === userId || normalized === username || normalized === chatId;
     });

@@ -251,7 +251,8 @@ export class CopilotCliService {
         }
 
         if (code !== 0 && code !== null) {
-          reject(new Error(`Copilot CLI exited with code ${code}\n${stderr}`));
+          console.error(`[Copilot] CLI exited with code ${code}. stderr: ${stderr}`);
+          reject(new Error(`Copilot CLI exited with code ${code}`));
           return;
         }
 
