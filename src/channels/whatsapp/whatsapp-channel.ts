@@ -193,7 +193,8 @@ export class WhatsAppChannel implements IChannel {
         const from = msg.key?.remoteJid ?? "unknown";
         const fromMe = msg.key?.fromMe ?? false;
         const text = extractMessageText(msg);
-        console.log(`[Gateway] [WhatsApp] Raw message: from=${from}, fromMe=${fromMe}, type=${type}, text=${text ?? "(no text)"}`);
+        const truncatedText = text ? (text.length > 80 ? text.slice(0, 80) + "..." : text) : "(no text)";
+        console.log(`[Gateway] [WhatsApp] Raw message: from=${from}, fromMe=${fromMe}, type=${type}, text=${truncatedText}`);
         await this.handleIncomingMessage(msg);
       }
     });

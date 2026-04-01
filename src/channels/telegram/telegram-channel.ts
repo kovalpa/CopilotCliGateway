@@ -164,7 +164,13 @@ export class TelegramChannel implements IChannel {
   private async downloadFile(fileId: string): Promise<Buffer> {
     const file = await this.bot!.api.getFile(fileId);
     const url = `https://api.telegram.org/file/bot${this.config.botToken}/${file.file_path}`;
-    const resp = await fetch(url);
+    let resp: Response;
+    try {
+      resp = await fetch(url);
+    } catch (err) {
+      // Wrap to avoid leaking the bot token from the URL in stack traces
+      throw new Error(`Failed to download Telegram file: network error`);
+    }
     if (!resp.ok) {
       throw new Error(`Failed to download Telegram file: ${resp.status} ${resp.statusText}`);
     }
