@@ -7,7 +7,7 @@ import { type PermissionsMode, fetchAvailableModels } from "./services/copilot-c
 import type { McpServerEntry } from "./services/mcp-config.js";
 import type { OpenAIConfig } from "./config.js";
 import { transcribe } from "./services/whisper.js";
-import type { SessionStore, SessionEntry } from "./services/session-store.js";
+import type { SessionStore, SessionEntry, BackendType } from "./services/session-store.js";
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm"]);
@@ -36,6 +36,7 @@ export class Gateway {
   private readonly mcpServers: McpServerEntry[];
   private readonly openaiConfig: OpenAIConfig;
   private readonly sessionStore: SessionStore;
+  private readonly backendType: BackendType;
   private availableModels: string[] = [];
   private instructions: string | null = null;
   /** Tracks whether the gateway is waiting for the user to provide a working directory. */
@@ -46,6 +47,8 @@ export class Gateway {
   private copilotInitializing = false;
   /** Serialization queue for Copilot calls — ensures one-at-a-time execution. */
   private copilotQueue: Promise<void> = Promise.resolve();
+  /** Tools rejected during instruction injection — forwarded to the next user response. */
+  private pendingRejectedTools: string[] = [];
 
   constructor(
     channels: IChannel[],
@@ -53,12 +56,14 @@ export class Gateway {
     mcpServers: McpServerEntry[] = [],
     openaiConfig?: OpenAIConfig,
     sessionStore?: SessionStore,
+    backendType: BackendType = "cli",
   ) {
     this.channels = channels;
     this.copilot = copilot;
     this.mcpServers = mcpServers;
     this.openaiConfig = openaiConfig ?? { apiKey: "", whisperModel: "whisper-1", language: "" };
     this.sessionStore = sessionStore!;
+    this.backendType = backendType;
   }
 
   /** Resolve the input (upload) directory: %TEMP%/in_<projectFolderName> */
@@ -108,11 +113,11 @@ export class Gateway {
     }
 
     // If there is an existing session with a working directory, inject instructions now
-    const existingSession = this.sessionStore.getActiveSession(SESSION_KEY);
+    const existingSession = this.sessionStore.getActiveSession(SESSION_KEY, this.backendType);
     if (existingSession?.workingDirectory) {
       console.log(`[Gateway] Resuming session "${existingSession.name}" — injecting instructions...`);
       this.instructedSessions.add(existingSession.id);
-      await this.injectInstructions(existingSession.id, existingSession.workingDirectory);
+      await this.injectInstructions(existingSession);
     }
 
     console.log("[Gateway] All channels started. Waiting for messages...");
@@ -135,19 +140,28 @@ export class Gateway {
    * Send the contents of instructions.md as the first message in a session
    * so the agent has context about the gateway environment.
    */
-  private async injectInstructions(sessionId: string, cwd?: string): Promise<void> {
+  private async injectInstructions(session: SessionEntry): Promise<void> {
     let text = await this.loadInstructions();
     if (!text) return;
 
     // Append actual temp folder paths so the agent knows where to read/write files
-    if (cwd) {
-      text += `\n\n## Current Paths\n- File input folder: ${this.inDir(cwd)}\n- File output folder: ${this.outDir(cwd)}`;
+    if (session.workingDirectory) {
+      text += `\n\n## Current Paths\n- File input folder: ${this.inDir(session.workingDirectory)}\n- File output folder: ${this.outDir(session.workingDirectory)}`;
     }
 
-    console.log(`[Gateway] Injecting instructions into session ${sessionId}...`);
+    console.log(`[Gateway] Injecting instructions into session ${session.id}...`);
     this.copilotInitializing = true;
     try {
-      await this.copilot.execute(text, sessionId, cwd);
+      const response = await this.copilot.execute(text, session.id, session.workingDirectory, session.acpSessionId);
+      // Persist ACP session ID
+      if (response.acpSessionId && response.acpSessionId !== session.acpSessionId) {
+        await this.sessionStore.setAcpSessionId(SESSION_KEY, session.id, response.acpSessionId);
+        session.acpSessionId = response.acpSessionId;
+      }
+      // Carry over rejected tools so the next user-facing response includes them
+      if (response.rejectedTools?.length) {
+        this.pendingRejectedTools.push(...response.rejectedTools);
+      }
       console.log("[Gateway] Instructions injected successfully.");
     } catch (err) {
       console.error("[Gateway] Failed to inject instructions:", err);
@@ -365,7 +379,7 @@ export class Gateway {
         const ext = extensionFromMimetype(msg.image.mimetype);
         const filename = `image-${Date.now()}.${ext}`;
 
-        const peekSession = this.sessionStore.getActiveSession(SESSION_KEY);
+        const peekSession = this.sessionStore.getActiveSession(SESSION_KEY, this.backendType);
         const workDir = peekSession?.workingDirectory;
         if (!workDir) {
           if (prompt) {
@@ -388,7 +402,7 @@ export class Gateway {
 
       // Handle file messages — save to %TEMP%/in_<project>/ so Copilot can access the file
       if (msg.file) {
-        const peekSession = this.sessionStore.getActiveSession(SESSION_KEY);
+        const peekSession = this.sessionStore.getActiveSession(SESSION_KEY, this.backendType);
         const workDir = peekSession?.workingDirectory;
         if (!workDir) {
           if (prompt) {
@@ -414,9 +428,9 @@ export class Gateway {
       }
 
       // Resolve shared session (same session across all channels)
-      let session = this.sessionStore.getActiveSession(SESSION_KEY);
+      let session = this.sessionStore.getActiveSession(SESSION_KEY, this.backendType);
       if (!session) {
-        session = await this.sessionStore.createSession(SESSION_KEY);
+        session = await this.sessionStore.createSession(SESSION_KEY, undefined, this.backendType);
         console.log(`[Gateway] Created new session "${session.name}" (${session.id}) for ${sender}`);
       }
 
@@ -445,15 +459,31 @@ export class Gateway {
       // Show typing indicator
       await channel.sendTyping?.(msg.senderId);
 
-      const response = await this.copilot.execute(prompt, session.id, session.workingDirectory);
+      const response = await this.copilot.execute(prompt, session.id, session.workingDirectory, session.acpSessionId);
+
+      // Persist ACP session ID so it survives gateway restarts
+      if (response.acpSessionId && response.acpSessionId !== session.acpSessionId) {
+        await this.sessionStore.setAcpSessionId(SESSION_KEY, session.id, response.acpSessionId);
+        session.acpSessionId = response.acpSessionId;
+      }
 
       // Stop typing
       await channel.stopTyping?.(msg.senderId);
 
+      // Collect all rejected tools (from instruction injection + this prompt)
+      const allRejected = [...this.pendingRejectedTools, ...(response.rejectedTools ?? [])];
+      this.pendingRejectedTools = [];
+
       // Build response with header
       const modelTag = response.model ?? "unknown";
       const header = `[ Copilot CLI - ${modelTag} ]`;
-      const fullResponse = `${header}\n\n${response.text}`;
+      let fullResponse = `${header}\n\n${response.text}`;
+
+      if (allRejected.length > 0) {
+        const unique = [...new Set(allRejected)];
+        const toolList = unique.map((t) => `• ${t}`).join("\n");
+        fullResponse += `\n\n⚠️ The following tools were blocked (permissions: ask):\n${toolList}\n\nUse /allow <tool> to grant access, or /permissions allow-all to allow everything.`;
+      }
 
       console.log(`[Gateway] [${channel.name}] Responding to ${sender} (${response.text.length} chars, model: ${modelTag})`);
       await channel.sendMessage(msg.senderId, fullResponse);
@@ -521,7 +551,7 @@ export class Gateway {
 
     // Inject instructions into the fresh session now that we have a cwd
     this.instructedSessions.add(session.id);
-    await this.injectInstructions(session.id, resolvedPath);
+    await this.injectInstructions(session);
 
     await channel.sendMessage(msg.senderId, [
       `Working directory set to:\n${resolvedPath}`,
@@ -537,7 +567,7 @@ export class Gateway {
   private async ensureInstructionsInjected(session: SessionEntry): Promise<void> {
     if (this.instructedSessions.has(session.id)) return;
     this.instructedSessions.add(session.id);
-    await this.injectInstructions(session.id, session.workingDirectory);
+    await this.injectInstructions(session);
   }
 
   // ── output files ──
@@ -591,9 +621,9 @@ export class Gateway {
   // ── /instructions ──
 
   private async handleInstructionsCommand(channel: IChannel, msg: ChannelMessage): Promise<void> {
-    let session = this.sessionStore.getActiveSession(SESSION_KEY);
+    let session = this.sessionStore.getActiveSession(SESSION_KEY, this.backendType);
     if (!session) {
-      session = await this.sessionStore.createSession(SESSION_KEY);
+      session = await this.sessionStore.createSession(SESSION_KEY, undefined, this.backendType);
     }
 
     // Force re-read from disk so edits are picked up
@@ -606,7 +636,7 @@ export class Gateway {
     }
 
     await channel.sendMessage(msg.senderId, "Injecting instructions...");
-    await this.injectInstructions(session.id, session.workingDirectory);
+    await this.injectInstructions(session);
     await this.reply(channel, msg.senderId, "Instructions injected into current session.", [
       [{ label: "📋 Menu", callbackData: "/help" }],
     ]);
@@ -617,7 +647,7 @@ export class Gateway {
   private async handleFolderCommand(channel: IChannel, msg: ChannelMessage, text: string): Promise<void> {
     const arg = text.slice("/folder".length).trim();
 
-    const session = this.sessionStore.getActiveSession(SESSION_KEY);
+    const session = this.sessionStore.getActiveSession(SESSION_KEY, this.backendType);
 
     // /folder — show current directory
     if (!arg) {
@@ -914,7 +944,7 @@ export class Gateway {
 
     // /session — show current session
     if (!arg) {
-      const session = this.sessionStore.getActiveSession(SESSION_KEY);
+      const session = this.sessionStore.getActiveSession(SESSION_KEY, this.backendType);
       const sessionButtons: MessageButtons = [
         [
           { label: "📋 List Sessions", callbackData: "/session list" },
@@ -944,7 +974,7 @@ export class Gateway {
     // /session new [name]
     if (arg === "new" || arg.startsWith("new ")) {
       const name = arg.slice("new".length).trim() || undefined;
-      const session = await this.sessionStore.createSession(SESSION_KEY, name);
+      const session = await this.sessionStore.createSession(SESSION_KEY, name, this.backendType);
       this.awaitingDirectory = false;
       console.log(`[Gateway] New session "${session.name}" (${session.id}) for ${msg.senderName ?? msg.senderId}`);
 
@@ -961,7 +991,7 @@ export class Gateway {
 
     // /session list
     if (arg === "list") {
-      const sessions = this.sessionStore.getAllSessions(SESSION_KEY);
+      const sessions = this.sessionStore.getAllSessions(SESSION_KEY, this.backendType);
       if (sessions.length === 0) {
         await this.reply(channel, msg.senderId, [
           "No sessions yet.",
@@ -974,7 +1004,7 @@ export class Gateway {
         return;
       }
 
-      const active = this.sessionStore.getActiveSession(SESSION_KEY);
+      const active = this.sessionStore.getActiveSession(SESSION_KEY, this.backendType);
       const lines = ["Your sessions:"];
       for (const s of sessions) {
         const marker = s.id === active?.id ? " [active]" : "";
@@ -1000,7 +1030,7 @@ export class Gateway {
     }
 
     // /session <name-or-id> — switch to existing session
-    const session = await this.sessionStore.setActiveSession(SESSION_KEY, arg);
+    const session = await this.sessionStore.setActiveSession(SESSION_KEY, arg, this.backendType);
     if (!session) {
       await this.reply(channel, msg.senderId, [
         `No session found matching: ${arg}`,

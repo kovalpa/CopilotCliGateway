@@ -173,7 +173,7 @@ export class CopilotCliService implements ICopilotBackend {
 
   // ── execution ──
 
-  execute(prompt: string, sessionId?: string, cwd?: string): Promise<CopilotResponse> {
+  execute(prompt: string, sessionId?: string, cwd?: string, _acpSessionId?: string): Promise<CopilotResponse> {
     return new Promise((resolve, reject) => {
       const permArgs = this.buildPermissionArgs();
 

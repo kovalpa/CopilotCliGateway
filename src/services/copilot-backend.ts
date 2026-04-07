@@ -1,6 +1,10 @@
 export interface CopilotResponse {
   text: string;
   model: string | null;
+  /** ACP session ID (returned by ACP backend so the gateway can persist it). */
+  acpSessionId?: string;
+  /** Tool names that were rejected during this execution (ACP ask mode). */
+  rejectedTools?: string[];
 }
 
 export type PermissionsMode = "ask" | "allow-all";
@@ -23,7 +27,7 @@ export interface ICopilotBackend {
 
   // ── execution ──
 
-  execute(prompt: string, sessionId?: string, cwd?: string): Promise<CopilotResponse>;
+  execute(prompt: string, sessionId?: string, cwd?: string, acpSessionId?: string): Promise<CopilotResponse>;
   abort(): boolean;
   get isRunning(): boolean;
 

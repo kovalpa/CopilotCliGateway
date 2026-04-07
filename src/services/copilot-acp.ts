@@ -51,6 +51,8 @@ export class CopilotAcpService implements ICopilotBackend {
   private _responseChunks: string[] = [];
   /** Model ID reported by the ACP server. */
   private _reportedModel: string | null = null;
+  /** Tools rejected during the current execution (for user feedback). */
+  private _rejectedTools: Set<string> = new Set();
 
   constructor(options: CopilotAcpOptions) {
     this.timeout = options.timeout;
@@ -105,12 +107,33 @@ export class CopilotAcpService implements ICopilotBackend {
 
     const client = {
       async requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
-        // Auto-approve: pick the best available option
-        const allowOption = params.options.find((o) => o.kind === "allow_always")
-          ?? params.options.find((o) => o.kind === "allow_once")
-          ?? params.options[0];
+        const toolName = params.toolCall.title ?? "";
 
-        return { outcome: { outcome: "selected" as const, optionId: allowOption.optionId } };
+        // Check denied list first — always reject denied tools
+        if (self._deniedTools.some((t) => toolName.includes(t))) {
+          const rejectOption = params.options.find((o) => o.kind === "reject_always")
+            ?? params.options.find((o) => o.kind === "reject_once")
+            ?? params.options[0];
+          console.log(`[ACP] Permission denied for: ${toolName}`);
+          return { outcome: { outcome: "selected" as const, optionId: rejectOption.optionId } };
+        }
+
+        // allow-all mode or tool is in the allowed list — approve
+        if (self._permissions === "allow-all"
+          || self._allowedTools.some((t) => toolName.includes(t))) {
+          const allowOption = params.options.find((o) => o.kind === "allow_always")
+            ?? params.options.find((o) => o.kind === "allow_once")
+            ?? params.options[0];
+          return { outcome: { outcome: "selected" as const, optionId: allowOption.optionId } };
+        }
+
+        // ask mode, tool not in either list — reject (can't prompt user mid-execution)
+        const rejectUnknown = params.options.find((o) => o.kind === "reject_once")
+          ?? params.options.find((o) => o.kind === "reject_always")
+          ?? params.options[0];
+        console.log(`[ACP] Permission rejected (ask mode, not in allowed list): ${toolName}`);
+        if (toolName) self._rejectedTools.add(toolName);
+        return { outcome: { outcome: "selected" as const, optionId: rejectUnknown.optionId } };
       },
 
       async sessionUpdate(params: SessionNotification): Promise<void> {
@@ -166,26 +189,27 @@ export class CopilotAcpService implements ICopilotBackend {
     return true;
   }
 
-  async execute(prompt: string, sessionId?: string, cwd?: string): Promise<CopilotResponse> {
+  async execute(prompt: string, sessionId?: string, cwd?: string, acpSessionId?: string): Promise<CopilotResponse> {
     if (!this.connection) {
       throw new Error("ACP backend not started. Call start() first.");
     }
 
     this._busy = true;
 
-    // Reset response accumulator
+    // Reset response accumulator and rejected tools tracker
     this._responseChunks.length = 0;
+    this._rejectedTools.clear();
 
     try {
       // Get or create ACP session for this gateway session
-      const acpSessionId = await this.getOrCreateSession(sessionId ?? "default", cwd);
-      this.cancelSessionId = acpSessionId;
+      const resolvedAcpSessionId = await this.getOrCreateSession(sessionId ?? "default", cwd, acpSessionId);
+      this.cancelSessionId = resolvedAcpSessionId;
 
       // Set model if configured
       if (this._model) {
         try {
           await this.connection.unstable_setSessionModel({
-            sessionId: acpSessionId,
+            sessionId: resolvedAcpSessionId,
             model: this._model,
           });
         } catch {
@@ -196,7 +220,7 @@ export class CopilotAcpService implements ICopilotBackend {
 
       // Send prompt with timeout
       const promptPromise = this.connection.prompt({
-        sessionId: acpSessionId,
+        sessionId: resolvedAcpSessionId,
         prompt: [{ type: "text", text: prompt }],
       });
 
@@ -215,6 +239,8 @@ export class CopilotAcpService implements ICopilotBackend {
       return {
         text: text || "(No response from Copilot ACP)",
         model: this._model ?? this._reportedModel,
+        acpSessionId: resolvedAcpSessionId,
+        rejectedTools: this._rejectedTools.size > 0 ? [...this._rejectedTools] : undefined,
       };
     } finally {
       this._busy = false;
@@ -222,13 +248,34 @@ export class CopilotAcpService implements ICopilotBackend {
     }
   }
 
-  private async getOrCreateSession(gatewaySessionId: string, cwd?: string): Promise<string> {
+  private async getOrCreateSession(gatewaySessionId: string, cwd?: string, storedAcpSessionId?: string): Promise<string> {
     // ACP sessions stay alive for the lifetime of the process — just reuse the ID
     const existing = this.acpSessions.get(gatewaySessionId);
     if (existing) return existing;
 
+    const workDir = cwd ?? this.workingDirectory ?? process.cwd();
+
+    // Try to restore a previous session from disk (survives gateway restarts)
+    if (storedAcpSessionId) {
+      try {
+        const loaded = await this.connection!.loadSession({
+          sessionId: storedAcpSessionId,
+          cwd: workDir,
+          mcpServers: [],
+        });
+        if (loaded.models?.currentModelId) {
+          this._reportedModel = loaded.models.currentModelId;
+        }
+        console.log(`[ACP] Loaded previous session: ${storedAcpSessionId} (gateway: ${gatewaySessionId.slice(0, 8)}...)`);
+        this.acpSessions.set(gatewaySessionId, storedAcpSessionId);
+        return storedAcpSessionId;
+      } catch (err) {
+        console.log(`[ACP] Could not load session ${storedAcpSessionId}, creating new.`);
+      }
+    }
+
     const result = await this.connection!.newSession({
-      cwd: cwd ?? this.workingDirectory ?? process.cwd(),
+      cwd: workDir,
       mcpServers: [],
     });
 
