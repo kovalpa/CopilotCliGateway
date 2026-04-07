@@ -16,6 +16,8 @@ export interface CopilotConfig {
   useGh: boolean;
   /** Communication backend: "cli" (spawn per request) or "acp" (persistent ACP server). Defaults to "cli". */
   backend: "cli" | "acp";
+  /** Interval in seconds to send stdout progress updates to the user. 0 disables. Defaults to 60. */
+  stdoutIntervalSeconds: number;
 }
 
 export interface OpenAIConfig {
@@ -55,6 +57,7 @@ const DEFAULT_CONFIG: GatewayConfig = {
     workingDirectory: "",
     useGh: false,
     backend: "cli",
+    stdoutIntervalSeconds: 60,
   },
   openai: {
     apiKey: "",

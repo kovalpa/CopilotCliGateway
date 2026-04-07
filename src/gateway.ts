@@ -1,5 +1,5 @@
 import { readdir, readFile, writeFile, unlink, mkdir } from "node:fs/promises";
-import { resolve, extname, isAbsolute, join, basename } from "node:path";
+import { resolve, extname, isAbsolute, join, basename, sep } from "node:path";
 import { tmpdir } from "node:os";
 import type { IChannel, ChannelMessage, MessageButtons } from "./channels/channel.js";
 import type { ICopilotBackend } from "./services/copilot-backend.js";
@@ -12,6 +12,45 @@ import type { SessionStore, SessionEntry, BackendType } from "./services/session
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm"]);
 const TEMP_BASE = tmpdir();
+
+// Security limits
+const MAX_PROMPT_LENGTH = 100_000;
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB (Whisper API limit)
+const MAX_IMAGE_SIZE = 20 * 1024 * 1024; // 20 MB
+const LOG_MESSAGE_TRUNCATE = 80;
+
+/** Strip directory components and dangerous characters from user-supplied filenames. */
+function sanitizeFilename(name: string): string {
+  // Take only the final path component to prevent traversal
+  let safe = basename(name);
+  // Remove any remaining path separator characters
+  safe = safe.replace(/[/\\]/g, "_");
+  // Collapse leading dots to prevent hidden files / traversal
+  safe = safe.replace(/^\.+/, "");
+  return safe || `file-${Date.now()}`;
+}
+
+/** Truncate a string for safe logging (avoid leaking full user messages). */
+function truncateForLog(text: string, max = LOG_MESSAGE_TRUNCATE): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max) + "...";
+}
+
+/** Produce a user-safe error message (no internal paths or stack traces). */
+function safeErrorMessage(err: unknown): string {
+  if (!(err instanceof Error)) return "An unexpected error occurred.";
+  const msg = err.message;
+  if (msg.includes("ENOENT")) return "A required file or directory was not found.";
+  if (msg.includes("EACCES") || msg.includes("EPERM")) return "Permission denied.";
+  if (msg.includes("ENOSPC")) return "No disk space available.";
+  if (msg.includes("ETIMEDOUT") || msg.includes("timed out")) return "The operation timed out.";
+  if (msg.includes("ECONNREFUSED")) return "Connection refused.";
+  // Generic fallback — strip anything that looks like a file path
+  const sanitized = msg.replace(/[A-Z]:[\\\/][^\s'",)]+/gi, "[path]")
+    .replace(/\/(?:home|usr|tmp|etc|var)[^\s'",)]+/g, "[path]");
+  return sanitized.split("\n")[0].slice(0, 200);
+}
 
 /** Map common image MIME types to file extensions. */
 function extensionFromMimetype(mimetype: string): string {
@@ -179,7 +218,7 @@ export class Gateway {
 
   private async handleMessage(channel: IChannel, msg: ChannelMessage): Promise<void> {
     const sender = msg.senderName ?? msg.senderId;
-    console.log(`[Gateway] [${channel.name}] Message from ${sender}: ${msg.body}`);
+    console.log(`[Gateway] [${channel.name}] Message from ${sender}: ${truncateForLog(msg.body)}`);
 
     const trimmed = msg.body.trim();
 
@@ -360,6 +399,11 @@ export class Gateway {
           return;
         }
 
+        if (msg.audio.buffer.length > MAX_AUDIO_SIZE) {
+          await channel.sendMessage(msg.senderId, `Audio too large (${(msg.audio.buffer.length / 1024 / 1024).toFixed(1)} MB). Max: ${MAX_AUDIO_SIZE / 1024 / 1024} MB.`);
+          return;
+        }
+
         console.log(`[Gateway] [Whisper] Transcribing audio (${msg.audio.buffer.length} bytes, ${msg.audio.mimetype})...`);
         await channel.sendTyping?.(msg.senderId);
 
@@ -376,6 +420,10 @@ export class Gateway {
 
       // Handle image messages — save to %TEMP%/in_<project>/images/ so Copilot can read the file
       if (msg.image) {
+        if (msg.image.buffer.length > MAX_IMAGE_SIZE) {
+          await channel.sendMessage(msg.senderId, `Image too large (${(msg.image.buffer.length / 1024 / 1024).toFixed(1)} MB). Max: ${MAX_IMAGE_SIZE / 1024 / 1024} MB.`);
+          return;
+        }
         const ext = extensionFromMimetype(msg.image.mimetype);
         const filename = `image-${Date.now()}.${ext}`;
 
@@ -402,6 +450,10 @@ export class Gateway {
 
       // Handle file messages — save to %TEMP%/in_<project>/ so Copilot can access the file
       if (msg.file) {
+        if (msg.file.buffer.length > MAX_FILE_SIZE) {
+          await channel.sendMessage(msg.senderId, `File too large (${(msg.file.buffer.length / 1024 / 1024).toFixed(1)} MB). Max: ${MAX_FILE_SIZE / 1024 / 1024} MB.`);
+          return;
+        }
         const peekSession = this.sessionStore.getActiveSession(SESSION_KEY, this.backendType);
         const workDir = peekSession?.workingDirectory;
         if (!workDir) {
@@ -411,19 +463,31 @@ export class Gateway {
         } else {
           const inPath = this.inDir(workDir);
           await mkdir(inPath, { recursive: true });
-          const filePath = join(inPath, msg.file.filename);
-          await writeFile(filePath, msg.file.buffer);
-          console.log(`[Gateway] Saved file to ${filePath} (${msg.file.buffer.length} bytes)`);
-
-          if (prompt) {
-            prompt = `${prompt}\n\nI've attached a file at ${filePath} — please read and process it.`;
+          const safeFilename = sanitizeFilename(msg.file.filename);
+          const filePath = resolve(inPath, safeFilename);
+          // Ensure the resolved path is still within the input directory
+          if (!filePath.startsWith(inPath + sep)) {
+            console.warn(`[Gateway] Blocked path traversal attempt in filename: ${msg.file.filename}`);
           } else {
-            prompt = `I've attached a file at ${filePath} — please read and process it.`;
+            await writeFile(filePath, msg.file.buffer);
+            console.log(`[Gateway] Saved file to ${filePath} (${msg.file.buffer.length} bytes)`);
+
+            if (prompt) {
+              prompt = `${prompt}\n\nI've attached a file at ${filePath} — please read and process it.`;
+            } else {
+              prompt = `I've attached a file at ${filePath} — please read and process it.`;
+            }
           }
         }
       }
 
       if (!prompt) {
+        return;
+      }
+
+      // Enforce prompt length limit
+      if (prompt.length > MAX_PROMPT_LENGTH) {
+        await channel.sendMessage(msg.senderId, `Message too long (${prompt.length} chars). Max: ${MAX_PROMPT_LENGTH.toLocaleString()} chars.`);
         return;
       }
 
@@ -456,10 +520,22 @@ export class Gateway {
       // Inject instructions on first Copilot call (session exists but instructions not yet sent)
       await this.ensureInstructionsInjected(session);
 
+      // Respond to the user that we Copilot is working, it may take a bit...
+      await channel.sendMessage(msg.senderId, `🤖 processing...`);
+
       // Show typing indicator
       await channel.sendTyping?.(msg.senderId);
 
-      const response = await this.copilot.execute(prompt, session.id, session.workingDirectory, session.acpSessionId);
+      // Build progress callback for CLI backend (ACP streams natively)
+      const onProgress = this.backendType === "cli"
+        ? (delta: string) => {
+            channel.sendMessage(msg.senderId, delta).catch((err) => {
+              console.error(`[Gateway] Failed to send progress update: ${err}`);
+            });
+          }
+        : undefined;
+
+      const response = await this.copilot.execute(prompt, session.id, session.workingDirectory, session.acpSessionId, onProgress);
 
       // Persist ACP session ID so it survives gateway restarts
       if (response.acpSessionId && response.acpSessionId !== session.acpSessionId) {
@@ -503,7 +579,7 @@ export class Gateway {
       console.error(`[Gateway] Error processing message: ${errorMsg}`);
       await channel.sendMessage(
         msg.senderId,
-        `Sorry, an error occurred:\n${errorMsg}`
+        `Sorry, an error occurred:\n${safeErrorMessage(err)}`
       );
     } finally {
       this.copilotBusy = false;
@@ -594,6 +670,11 @@ export class Gateway {
 
     for (const file of files) {
       const filePath = resolve(dir, file);
+      // Prevent path traversal — ensure file stays within the outputs directory
+      if (!filePath.startsWith(dir + sep)) {
+        console.warn(`[Gateway] Blocked path traversal in output file: ${file}`);
+        continue;
+      }
       const ext = extname(file).toLowerCase();
       try {
         const buffer = await readFile(filePath);

@@ -1,7 +1,7 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
-import type { ICopilotBackend, CopilotResponse, PermissionsMode } from "./copilot-backend.js";
+import type { ICopilotBackend, CopilotResponse, PermissionsMode, ProgressCallback } from "./copilot-backend.js";
 
-export type { CopilotResponse, PermissionsMode };
+export type { CopilotResponse, PermissionsMode, ProgressCallback };
 
 export interface CopilotCliOptions {
   timeout: number;
@@ -9,6 +9,8 @@ export interface CopilotCliOptions {
   workingDirectory?: string;
   /** If true, use "gh copilot" instead of "copilot" directly. */
   useGh?: boolean;
+  /** Interval in seconds to send stdout progress updates. 0 disables. */
+  stdoutIntervalSeconds?: number;
 }
 
 const ANSI_REGEX = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
@@ -58,6 +60,7 @@ export class CopilotCliService implements ICopilotBackend {
   private readonly additionalArgs: string[];
   readonly useGh: boolean;
   readonly workingDirectory: string | undefined;
+  readonly stdoutIntervalSeconds: number;
   private _model: string | null = null;
   private _permissions: PermissionsMode = "ask";
   private _allowedTools: string[] = [];
@@ -69,6 +72,7 @@ export class CopilotCliService implements ICopilotBackend {
     this.additionalArgs = options.additionalArgs;
     this.useGh = options.useGh ?? false;
     this.workingDirectory = options.workingDirectory || undefined;
+    this.stdoutIntervalSeconds = options.stdoutIntervalSeconds ?? 60;
   }
 
   // ── lifecycle (no-op for CLI mode) ──
@@ -173,7 +177,7 @@ export class CopilotCliService implements ICopilotBackend {
 
   // ── execution ──
 
-  execute(prompt: string, sessionId?: string, cwd?: string, _acpSessionId?: string): Promise<CopilotResponse> {
+  execute(prompt: string, sessionId?: string, cwd?: string, _acpSessionId?: string, onProgress?: ProgressCallback): Promise<CopilotResponse> {
     return new Promise((resolve, reject) => {
       const permArgs = this.buildPermissionArgs();
 
@@ -203,6 +207,21 @@ export class CopilotCliService implements ICopilotBackend {
       let stdout = "";
       let stderr = "";
       let timedOut = false;
+      let lastSentIndex = 0;
+
+      // Progress interval — send new stdout delta to the caller periodically
+      let progressHandle: ReturnType<typeof setInterval> | null = null;
+      if (onProgress && this.stdoutIntervalSeconds > 0) {
+        progressHandle = setInterval(() => {
+          if (stdout.length > lastSentIndex) {
+            const delta = stripAnsi(stdout.slice(lastSentIndex)).trim();
+            if (delta) {
+              onProgress(delta);
+            }
+            lastSentIndex = stdout.length;
+          }
+        }, this.stdoutIntervalSeconds * 1000);
+      }
 
       // Manual timeout — spawn() does not support the timeout option
       const timeoutHandle = setTimeout(() => {
@@ -223,6 +242,7 @@ export class CopilotCliService implements ICopilotBackend {
       });
 
       child.on("error", (err) => {
+        if (progressHandle) clearInterval(progressHandle);
         this._activeChild = null;
         reject(new Error(`Failed to start Copilot CLI: ${err.message}`));
       });
@@ -233,6 +253,7 @@ export class CopilotCliService implements ICopilotBackend {
       // "exit" fires as soon as the main process exits.
       child.on("exit", (code, signal) => {
         clearTimeout(timeoutHandle);
+        if (progressHandle) clearInterval(progressHandle);
         this._activeChild = null;
 
         // Detach stdio so lingering child processes don't block garbage collection
@@ -252,17 +273,20 @@ export class CopilotCliService implements ICopilotBackend {
         }
 
         if (code !== 0 && code !== null) {
-          reject(new Error(`Copilot CLI exited with code ${code}\n${stderr}`));
+          console.error(`[Copilot] CLI exited with code ${code}. stderr: ${stderr}`);
+          reject(new Error(`Copilot CLI exited with code ${code}`));
           return;
         }
 
-        const text = stripAnsi(stdout).trim();
+        // If progress updates were sent, only return the remaining unsent portion
+        const remaining = lastSentIndex > 0 ? stdout.slice(lastSentIndex) : stdout;
+        const text = stripAnsi(remaining).trim();
         const model = extractModel(stripAnsi(stderr));
 
-        if (!text) {
+        if (!text && lastSentIndex === 0) {
           resolve({ text: "(No response from Copilot CLI)", model });
         } else {
-          resolve({ text, model });
+          resolve({ text: text || "(No additional output)", model });
         }
       });
 

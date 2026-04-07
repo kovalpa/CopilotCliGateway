@@ -142,13 +142,14 @@ export class TelegramChannel implements IChannel {
   // --------------- Private helpers ---------------
 
   private isAllowed(ctx: Context): boolean {
-    if (this.config.allowedUsers.length === 0) return true;
+    const filteredUsers = this.config.allowedUsers.filter((u) => u.trim());
+    if (filteredUsers.length === 0) return true;
 
     const userId = String(ctx.from?.id ?? "");
     const username = (ctx.from?.username ?? "").toLowerCase();
     const chatId = String(ctx.chat?.id ?? "");
 
-    return this.config.allowedUsers.some((entry) => {
+    return filteredUsers.some((entry) => {
       const normalized = entry.replace(/^@/, "").toLowerCase();
       return normalized === userId || normalized === username || normalized === chatId;
     });
@@ -163,7 +164,13 @@ export class TelegramChannel implements IChannel {
   private async downloadFile(fileId: string): Promise<Buffer> {
     const file = await this.bot!.api.getFile(fileId);
     const url = `https://api.telegram.org/file/bot${this.config.botToken}/${file.file_path}`;
-    const resp = await fetch(url);
+    let resp: Response;
+    try {
+      resp = await fetch(url);
+    } catch (err) {
+      // Wrap to avoid leaking the bot token from the URL in stack traces
+      throw new Error(`Failed to download Telegram file: network error`);
+    }
     if (!resp.ok) {
       throw new Error(`Failed to download Telegram file: ${resp.status} ${resp.statusText}`);
     }

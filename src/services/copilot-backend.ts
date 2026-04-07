@@ -9,6 +9,9 @@ export interface CopilotResponse {
 
 export type PermissionsMode = "ask" | "allow-all";
 
+/** Callback that receives new stdout text since the last progress tick. */
+export type ProgressCallback = (delta: string) => void;
+
 /**
  * Common interface for interacting with GitHub Copilot CLI.
  *
@@ -27,7 +30,7 @@ export interface ICopilotBackend {
 
   // ── execution ──
 
-  execute(prompt: string, sessionId?: string, cwd?: string, acpSessionId?: string): Promise<CopilotResponse>;
+  execute(prompt: string, sessionId?: string, cwd?: string, acpSessionId?: string, onProgress?: ProgressCallback): Promise<CopilotResponse>;
   abort(): boolean;
   get isRunning(): boolean;
 

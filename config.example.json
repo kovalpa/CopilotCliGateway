@@ -11,13 +11,14 @@
     "enabled": true,
     "botToken": "",
     "allowedUsers": [
-      "@fromkoval"
+      "@<yourusername>"
     ]
   },
   "copilot": {
-    "timeout": 1200000,
+    "timeout": 2400000,
     "additionalArgs": [],
-    "useGh": true
+    "useGh": false,
+    "stdoutIntervalSeconds": 60
   },
   "openai": {
     "apiKey": "",

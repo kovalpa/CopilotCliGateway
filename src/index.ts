@@ -58,6 +58,7 @@ async function main(): Promise<void> {
       additionalArgs: config.copilot.additionalArgs,
       workingDirectory: config.copilot.workingDirectory,
       useGh: config.copilot.useGh,
+      stdoutIntervalSeconds: config.copilot.stdoutIntervalSeconds,
     });
   }
 

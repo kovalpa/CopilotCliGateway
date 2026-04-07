@@ -12,7 +12,7 @@ import {
   type WriteTextFileRequest,
   type WriteTextFileResponse,
 } from "@agentclientprotocol/sdk";
-import type { ICopilotBackend, CopilotResponse, PermissionsMode } from "./copilot-backend.js";
+import type { ICopilotBackend, CopilotResponse, PermissionsMode, ProgressCallback } from "./copilot-backend.js";
 
 export interface CopilotAcpOptions {
   timeout: number;
@@ -189,7 +189,7 @@ export class CopilotAcpService implements ICopilotBackend {
     return true;
   }
 
-  async execute(prompt: string, sessionId?: string, cwd?: string, acpSessionId?: string): Promise<CopilotResponse> {
+  async execute(prompt: string, sessionId?: string, cwd?: string, acpSessionId?: string, _onProgress?: ProgressCallback): Promise<CopilotResponse> {
     if (!this.connection) {
       throw new Error("ACP backend not started. Call start() first.");
     }

@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, rename } from "node:fs/promises";
 import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -40,7 +40,10 @@ export class SessionStore {
   }
 
   private async save(): Promise<void> {
-    await writeFile(this.filePath, JSON.stringify(this.data, null, 2), "utf-8");
+    // Atomic write: write to a temp file then rename to prevent corruption
+    const tmpPath = `${this.filePath}.${Date.now()}.tmp`;
+    await writeFile(tmpPath, JSON.stringify(this.data, null, 2), "utf-8");
+    await rename(tmpPath, this.filePath);
   }
 
   private ensureUser(senderId: string): UserSessions {

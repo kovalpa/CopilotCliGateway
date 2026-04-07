@@ -10,6 +10,9 @@ auth_state/
 # Session data
 sessions.json
 
+# Config (contains secrets — use config.example.json as template)
+config.json
+
 # Temporary files (user-uploaded images)
 tmp/
 
