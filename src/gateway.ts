@@ -1,5 +1,6 @@
 import { readdir, readFile, writeFile, unlink, mkdir } from "node:fs/promises";
-import { resolve, extname, isAbsolute } from "node:path";
+import { resolve, extname, isAbsolute, join, basename } from "node:path";
+import { tmpdir } from "node:os";
 import type { IChannel, ChannelMessage, MessageButtons } from "./channels/channel.js";
 import { type CopilotCliService, type PermissionsMode, fetchAvailableModels } from "./services/copilot-cli.js";
 import type { McpServerEntry } from "./services/mcp-config.js";
@@ -9,8 +10,7 @@ import type { SessionStore, SessionEntry } from "./services/session-store.js";
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".avi", ".mkv", ".webm"]);
-const OUTPUTS_FOLDER = "outputs";
-const TMP_FOLDER = "tmp";
+const TEMP_BASE = tmpdir();
 
 /** Map common image MIME types to file extensions. */
 function extensionFromMimetype(mimetype: string): string {
@@ -60,14 +60,14 @@ export class Gateway {
     this.sessionStore = sessionStore!;
   }
 
-  /** Resolve the outputs directory relative to the given working directory. */
-  private outputsDir(workingDirectory?: string): string {
-    return resolve(workingDirectory ?? ".", OUTPUTS_FOLDER);
+  /** Resolve the input (upload) directory: %TEMP%/in_<projectFolderName> */
+  private inDir(workingDirectory: string): string {
+    return join(TEMP_BASE, `in_${basename(workingDirectory)}`);
   }
 
-  /** Resolve the tmp directory relative to the given working directory. */
-  private tmpDir(workingDirectory?: string): string {
-    return resolve(workingDirectory ?? ".", TMP_FOLDER);
+  /** Resolve the output directory: %TEMP%/out_<projectFolderName> */
+  private outDir(workingDirectory: string): string {
+    return join(TEMP_BASE, `out_${basename(workingDirectory)}`);
   }
 
   get openaiEnabled(): boolean {
@@ -135,8 +135,13 @@ export class Gateway {
    * so the agent has context about the gateway environment.
    */
   private async injectInstructions(sessionId: string, cwd?: string): Promise<void> {
-    const text = await this.loadInstructions();
+    let text = await this.loadInstructions();
     if (!text) return;
+
+    // Append actual temp folder paths so the agent knows where to read/write files
+    if (cwd) {
+      text += `\n\n## Current Paths\n- File input folder: ${this.inDir(cwd)}\n- File output folder: ${this.outDir(cwd)}`;
+    }
 
     console.log(`[Gateway] Injecting instructions into session ${sessionId}...`);
     this.copilotInitializing = true;
@@ -354,12 +359,11 @@ export class Gateway {
         prompt = transcription;
       }
 
-      // Handle image messages — save to tmp/images/ so Copilot can read the file directly
+      // Handle image messages — save to %TEMP%/in_<project>/images/ so Copilot can read the file
       if (msg.image) {
         const ext = extensionFromMimetype(msg.image.mimetype);
         const filename = `image-${Date.now()}.${ext}`;
 
-        // We need a working directory to save the file; peek at the session
         const peekSession = this.sessionStore.getActiveSession(SESSION_KEY);
         const workDir = peekSession?.workingDirectory;
         if (!workDir) {
@@ -367,22 +371,21 @@ export class Gateway {
             prompt = `${prompt}\n\n(An image was attached but cannot be processed until a working directory is set.)`;
           }
         } else {
-          const imagesPath = resolve(this.tmpDir(workDir), "images");
+          const imagesPath = join(this.inDir(workDir), "images");
           await mkdir(imagesPath, { recursive: true });
-          const filePath = resolve(imagesPath, filename);
+          const filePath = join(imagesPath, filename);
           await writeFile(filePath, msg.image.buffer);
           console.log(`[Gateway] Saved image to ${filePath} (${msg.image.buffer.length} bytes)`);
 
-          const relativePath = `./tmp/images/${filename}`;
           if (prompt) {
-            prompt = `${prompt}\n\nI've attached an image at ${relativePath} — please read and analyze it.`;
+            prompt = `${prompt}\n\nI've attached an image at ${filePath} — please read and analyze it.`;
           } else {
-            prompt = `I've attached an image at ${relativePath} — please read and analyze it.`;
+            prompt = `I've attached an image at ${filePath} — please read and analyze it.`;
           }
         }
       }
 
-      // Handle file messages — save to tmp/ so Copilot can access the file
+      // Handle file messages — save to %TEMP%/in_<project>/ so Copilot can access the file
       if (msg.file) {
         const peekSession = this.sessionStore.getActiveSession(SESSION_KEY);
         const workDir = peekSession?.workingDirectory;
@@ -391,17 +394,16 @@ export class Gateway {
             prompt = `${prompt}\n\n(A file was attached but cannot be processed until a working directory is set.)`;
           }
         } else {
-          const tmpPath = this.tmpDir(workDir);
-          await mkdir(tmpPath, { recursive: true });
-          const filePath = resolve(tmpPath, msg.file.filename);
+          const inPath = this.inDir(workDir);
+          await mkdir(inPath, { recursive: true });
+          const filePath = join(inPath, msg.file.filename);
           await writeFile(filePath, msg.file.buffer);
           console.log(`[Gateway] Saved file to ${filePath} (${msg.file.buffer.length} bytes)`);
 
-          const relativePath = `./tmp/${msg.file.filename}`;
           if (prompt) {
-            prompt = `${prompt}\n\nI've attached a file at ${relativePath} — please read and process it.`;
+            prompt = `${prompt}\n\nI've attached a file at ${filePath} — please read and process it.`;
           } else {
-            prompt = `I've attached a file at ${relativePath} — please read and process it.`;
+            prompt = `I've attached a file at ${filePath} — please read and process it.`;
           }
         }
       }
@@ -500,9 +502,9 @@ export class Gateway {
     try {
       await mkdir(resolvedPath, { recursive: true });
 
-      // Ensure the outputs and tmp sub-folders exist
-      await mkdir(this.outputsDir(resolvedPath), { recursive: true });
-      await mkdir(this.tmpDir(resolvedPath), { recursive: true });
+      // Ensure the temp in/out sub-folders exist
+      await mkdir(this.inDir(resolvedPath), { recursive: true });
+      await mkdir(this.outDir(resolvedPath), { recursive: true });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       await channel.sendMessage(msg.senderId, `Failed to create directory:\n${errMsg}\n\nPlease send a valid path.`);
@@ -546,9 +548,9 @@ export class Gateway {
   private async sendOutputFiles(
     channel: IChannel,
     recipientId: string,
-    workingDirectory?: string,
+    workingDirectory: string,
   ): Promise<void> {
-    const dir = this.outputsDir(workingDirectory);
+    const dir = this.outDir(workingDirectory);
     let entries: string[];
     try {
       entries = await readdir(dir);
@@ -643,8 +645,8 @@ export class Gateway {
 
     try {
       await mkdir(resolvedPath, { recursive: true });
-      await mkdir(this.outputsDir(resolvedPath), { recursive: true });
-      await mkdir(this.tmpDir(resolvedPath), { recursive: true });
+      await mkdir(this.inDir(resolvedPath), { recursive: true });
+      await mkdir(this.outDir(resolvedPath), { recursive: true });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       await channel.sendMessage(msg.senderId, `Failed to create directory:\n${errMsg}`);

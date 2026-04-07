@@ -8,11 +8,11 @@ If you need to ask the user a question, simply include it as plain text in your 
 
 ## File Input
 
-When the user sends a file, it is saved to the `./tmp` folder (relative to your working directory). Images are saved to `./tmp/images`. The prompt will include the file path — use the Read tool to open and analyze the file directly.
+When the user sends a file, it is saved to the system temp directory under a folder named `in_<project>` (where `<project>` is the working directory folder name). The prompt will include the absolute file path — use the Read tool to open and analyze the file directly.
 
 ## File Output
 
-When the user asks for a screenshot, a visual, a document, or any file output, save the file to the `./outputs` folder (relative to your working directory). The gateway will automatically pick up any new files from that folder and deliver them to the user in chat.
+When the user asks for a screenshot, a visual, a document, or any file output, save the file to the `out_<project>` folder in the system temp directory (where `<project>` is the working directory folder name). The prompt will include the absolute path to this folder. The gateway will automatically pick up any new files from that folder and deliver them to the user in chat.
 
 Supported file types:
 - **Images**: PNG, JPG, JPEG, GIF, WEBP, BMP
