@@ -42,6 +42,10 @@ function displayStatus(config: GatewayConfig): void {
       ? chalk.green("  \u2705 Telegram  \u2014 Configured")
       : chalk.red("  \u274C Telegram  \u2014 Not configured"),
   );
+
+  const backend = config.copilot.backend ?? "cli";
+  const backendLabel = backend === "acp" ? "ACP (persistent server)" : "CLI (spawn per request)";
+  console.log(chalk.blue(`  \u2699  Backend   \u2014 ${backendLabel}`));
   console.log();
 }
 

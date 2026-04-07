@@ -1,7 +1,9 @@
 import { rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { loadConfig } from "./config.js";
+import type { ICopilotBackend } from "./services/copilot-backend.js";
 import { CopilotCliService } from "./services/copilot-cli.js";
+import { CopilotAcpService } from "./services/copilot-acp.js";
 import { loadMcpServers } from "./services/mcp-config.js";
 import { SessionStore } from "./services/session-store.js";
 import { WhatsAppChannel } from "./channels/whatsapp/whatsapp-channel.js";
@@ -38,12 +40,29 @@ async function main(): Promise<void> {
     console.log("[Gateway] Auth state cleared. QR code will be shown on connect.\n");
   }
 
-  const copilot = new CopilotCliService({
-    timeout: config.copilot.timeout,
-    additionalArgs: config.copilot.additionalArgs,
-    workingDirectory: config.copilot.workingDirectory,
-    useGh: config.copilot.useGh,
-  });
+  const backendType = config.copilot.backend ?? "cli";
+  let copilot: ICopilotBackend;
+
+  if (backendType === "acp") {
+    console.log("[Gateway] Using ACP backend (persistent Agent Client Protocol server).");
+    copilot = new CopilotAcpService({
+      timeout: config.copilot.timeout,
+      additionalArgs: config.copilot.additionalArgs,
+      workingDirectory: config.copilot.workingDirectory,
+      useGh: config.copilot.useGh,
+    });
+  } else {
+    console.log("[Gateway] Using CLI backend (spawn per request).");
+    copilot = new CopilotCliService({
+      timeout: config.copilot.timeout,
+      additionalArgs: config.copilot.additionalArgs,
+      workingDirectory: config.copilot.workingDirectory,
+      useGh: config.copilot.useGh,
+    });
+  }
+
+  // Start the backend (no-op for CLI, starts ACP server for ACP)
+  await copilot.start();
 
   if (config.copilot.workingDirectory) {
     console.log(`[Gateway] Copilot working directory: ${config.copilot.workingDirectory}`);
@@ -94,6 +113,7 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     console.log("\n[Gateway] Shutting down...");
     await gateway.stop();
+    await copilot.stop();
     process.exit(0);
   };
 

@@ -1,4 +1,7 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
+import type { ICopilotBackend, CopilotResponse, PermissionsMode } from "./copilot-backend.js";
+
+export type { CopilotResponse, PermissionsMode };
 
 export interface CopilotCliOptions {
   timeout: number;
@@ -6,11 +9,6 @@ export interface CopilotCliOptions {
   workingDirectory?: string;
   /** If true, use "gh copilot" instead of "copilot" directly. */
   useGh?: boolean;
-}
-
-export interface CopilotResponse {
-  text: string;
-  model: string | null;
 }
 
 const ANSI_REGEX = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
@@ -55,9 +53,7 @@ export function fetchAvailableModels(useGh = false): Promise<string[]> {
   });
 }
 
-export type PermissionsMode = "ask" | "allow-all";
-
-export class CopilotCliService {
+export class CopilotCliService implements ICopilotBackend {
   private readonly timeout: number;
   private readonly additionalArgs: string[];
   readonly useGh: boolean;
@@ -74,6 +70,11 @@ export class CopilotCliService {
     this.useGh = options.useGh ?? false;
     this.workingDirectory = options.workingDirectory || undefined;
   }
+
+  // ── lifecycle (no-op for CLI mode) ──
+
+  async start(): Promise<void> {}
+  async stop(): Promise<void> { this.abort(); }
 
   // ── model ──
 

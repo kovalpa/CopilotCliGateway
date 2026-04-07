@@ -2,7 +2,8 @@ import { readdir, readFile, writeFile, unlink, mkdir } from "node:fs/promises";
 import { resolve, extname, isAbsolute, join, basename } from "node:path";
 import { tmpdir } from "node:os";
 import type { IChannel, ChannelMessage, MessageButtons } from "./channels/channel.js";
-import { type CopilotCliService, type PermissionsMode, fetchAvailableModels } from "./services/copilot-cli.js";
+import type { ICopilotBackend } from "./services/copilot-backend.js";
+import { type PermissionsMode, fetchAvailableModels } from "./services/copilot-cli.js";
 import type { McpServerEntry } from "./services/mcp-config.js";
 import type { OpenAIConfig } from "./config.js";
 import { transcribe } from "./services/whisper.js";
@@ -31,7 +32,7 @@ const SESSION_KEY = "shared";
 
 export class Gateway {
   private readonly channels: IChannel[];
-  private readonly copilot: CopilotCliService;
+  private readonly copilot: ICopilotBackend;
   private readonly mcpServers: McpServerEntry[];
   private readonly openaiConfig: OpenAIConfig;
   private readonly sessionStore: SessionStore;
@@ -48,7 +49,7 @@ export class Gateway {
 
   constructor(
     channels: IChannel[],
-    copilot: CopilotCliService,
+    copilot: ICopilotBackend,
     mcpServers: McpServerEntry[] = [],
     openaiConfig?: OpenAIConfig,
     sessionStore?: SessionStore,

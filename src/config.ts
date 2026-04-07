@@ -14,6 +14,8 @@ export interface CopilotConfig {
   workingDirectory: string;
   /** If true, use "gh copilot" instead of "copilot" directly. Defaults to false. */
   useGh: boolean;
+  /** Communication backend: "cli" (spawn per request) or "acp" (persistent ACP server). Defaults to "cli". */
+  backend: "cli" | "acp";
 }
 
 export interface OpenAIConfig {
@@ -52,6 +54,7 @@ const DEFAULT_CONFIG: GatewayConfig = {
     additionalArgs: [],
     workingDirectory: "",
     useGh: false,
+    backend: "cli",
   },
   openai: {
     apiKey: "",
