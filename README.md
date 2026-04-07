@@ -18,6 +18,7 @@ Send a message in your chat app, get a response from Copilot — complete with s
 - **MCP server support** — Automatically discovers configured [MCP servers](https://modelcontextprotocol.io/)
 - **Interactive menus** — Telegram inline keyboard buttons for all commands
 - **System instructions** — Inject custom instructions from `instructions.md` into every session
+- **Dual backend support** — Choose between CLI (spawn per request) or ACP (persistent [Agent Client Protocol](https://agentclientprotocol.com/) server) via config
 - **Abort support** — Stop a long-running Copilot process mid-execution with `/stop`
 
 ## Prerequisites
@@ -54,6 +55,7 @@ Edit `config.json` to set up your channels and services:
   "copilot": {
     "timeout": 1200000,         // Max execution time in ms (20 minutes)
     "additionalArgs": [],       // Extra CLI arguments
+    "backend": "cli",           // "cli" (spawn per request) or "acp" (persistent ACP server)
     "useGh": true               // Use "gh copilot" vs standalone "copilot"
   },
   "openai": {
@@ -123,7 +125,9 @@ CopilotCliGateway/
 │   │   └── telegram/
 │   │       └── telegram-channel.ts
 │   └── services/
-│       ├── copilot-cli.ts       # Copilot CLI process management
+│       ├── copilot-backend.ts   # ICopilotBackend interface
+│       ├── copilot-cli.ts       # CLI backend (spawn per request)
+│       ├── copilot-acp.ts       # ACP backend (persistent server)
 │       ├── session-store.ts     # Session persistence
 │       ├── mcp-config.ts        # MCP server discovery
 │       └── whisper.ts           # OpenAI Whisper transcription
@@ -133,12 +137,23 @@ CopilotCliGateway/
 └── tsconfig.json
 ```
 
+## Backends
+
+The gateway supports two communication backends with Copilot CLI, configured via `copilot.backend` in `config.json`:
+
+| Backend | Config value | How it works | Best for |
+|---|---|---|---|
+| **CLI** | `"cli"` (default) | Spawns `copilot -p` as a new process per request | Simplicity, compatibility |
+| **ACP** | `"acp"` | Starts a persistent `copilot --acp` server and communicates via the [Agent Client Protocol](https://agentclientprotocol.com/) (NDJSON over stdio) | Lower latency, persistent sessions without re-spawning |
+
+Both backends support the same feature set (sessions, model switching, permissions, file I/O, abort). The active backend is shown on the startup menu.
+
 ## How It Works
 
 1. The gateway starts one or both messaging channels (WhatsApp / Telegram)
 2. Incoming messages are filtered by the allowed users/numbers whitelist
 3. Voice messages are transcribed via Whisper; images and files are saved to the system temp directory (`%TEMP%/in_<project>/`)
-4. The message (or transcription) is sent to Copilot CLI as a prompt via `spawn()`, with absolute file paths included
+4. The message (or transcription) is sent to Copilot via the configured backend (CLI spawns `copilot -p` per request; ACP uses a persistent `copilot --acp` server over the Agent Client Protocol)
 5. Copilot's response is delivered back to the user in chat
 6. Any files Copilot saves to `%TEMP%/out_<project>/` are automatically sent to the user
 7. Sessions persist across restarts, so you can pick up where you left off
