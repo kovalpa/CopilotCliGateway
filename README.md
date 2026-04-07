@@ -10,9 +10,9 @@ Send a message in your chat app, get a response from Copilot — complete with s
 - **Session management** — Create, switch, and list named sessions; context persists across restarts
 - **Per-session working directories** — Each session can target a different project folder
 - **Voice messages** — Automatic transcription via OpenAI Whisper, then forwarded to Copilot
-- **File input** — Send any file (documents, PDFs, spreadsheets, etc.) to Copilot; images are saved to `tmp/images/`, other files to `tmp/`
-- **Image input** — Send photos to Copilot for analysis (saved to `tmp/images/`, read by Copilot directly)
-- **File output** — Copilot saves files to `outputs/` and they're automatically delivered to your chat (images, videos, documents)
+- **File input** — Send any file (documents, PDFs, spreadsheets, etc.) to Copilot; files are saved to `%TEMP%/in_<project>/`, images to `%TEMP%/in_<project>/images/`
+- **Image input** — Send photos to Copilot for analysis (saved to the system temp input folder, read by Copilot via absolute path)
+- **File output** — Copilot saves files to `%TEMP%/out_<project>/` and they're automatically delivered to your chat (images, videos, documents)
 - **Model switching** — Change the AI model on the fly with `/model`
 - **Permission controls** — Toggle between `ask` and `allow-all` modes; allow or deny specific tools
 - **MCP server support** — Automatically discovers configured [MCP servers](https://modelcontextprotocol.io/)
@@ -137,10 +137,10 @@ CopilotCliGateway/
 
 1. The gateway starts one or both messaging channels (WhatsApp / Telegram)
 2. Incoming messages are filtered by the allowed users/numbers whitelist
-3. Voice messages are transcribed via Whisper; images are saved to `tmp/images/`; other files are saved to `tmp/`
-4. The message (or transcription) is sent to Copilot CLI as a prompt via `spawn()`
+3. Voice messages are transcribed via Whisper; images and files are saved to the system temp directory (`%TEMP%/in_<project>/`)
+4. The message (or transcription) is sent to Copilot CLI as a prompt via `spawn()`, with absolute file paths included
 5. Copilot's response is delivered back to the user in chat
-6. Any files Copilot saves to `outputs/` are automatically sent to the user
+6. Any files Copilot saves to `%TEMP%/out_<project>/` are automatically sent to the user
 7. Sessions persist across restarts, so you can pick up where you left off
 
 ## License
