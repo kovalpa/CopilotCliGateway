@@ -1,4 +1,4 @@
-import { readdir, readFile, writeFile, unlink, mkdir } from "node:fs/promises";
+import { readdir, readFile, writeFile, unlink, mkdir, access } from "node:fs/promises";
 import { resolve, extname, isAbsolute, join, basename, sep } from "node:path";
 import { tmpdir } from "node:os";
 import type { IChannel, ChannelMessage, MessageButtons } from "./channels/channel.js";
@@ -80,6 +80,8 @@ export class Gateway {
   private instructions: string | null = null;
   /** Tracks whether the gateway is waiting for the user to provide a working directory. */
   private awaitingDirectory = false;
+  /** Path pending user confirmation to create (when the folder doesn't exist). */
+  private pendingDirectoryCreate: string | null = null;
   /** Whether a Copilot call is currently in progress. */
   private copilotBusy = false;
   /** Whether the current Copilot call is injecting system instructions (vs. a user prompt). */
@@ -154,9 +156,17 @@ export class Gateway {
     // If there is an existing session with a working directory, inject instructions now
     const existingSession = this.sessionStore.getActiveSession(SESSION_KEY, this.backendType);
     if (existingSession?.workingDirectory) {
-      console.log(`[Gateway] Resuming session "${existingSession.name}" — injecting instructions...`);
-      this.instructedSessions.add(existingSession.id);
-      await this.injectInstructions(existingSession);
+      const dirExists = await access(existingSession.workingDirectory).then(() => true, () => false);
+      if (dirExists) {
+        console.log(`[Gateway] Resuming session "${existingSession.name}" — injecting instructions...`);
+        this.instructedSessions.add(existingSession.id);
+        await this.injectInstructions(existingSession);
+      } else {
+        console.warn(`[Gateway] Working directory no longer exists: ${existingSession.workingDirectory}`);
+        existingSession.workingDirectory = undefined;
+        await this.sessionStore.setWorkingDirectory(SESSION_KEY, existingSession.id, undefined);
+        this.awaitingDirectory = true;
+      }
     }
 
     console.log("[Gateway] All channels started. Waiting for messages...");
@@ -498,6 +508,12 @@ export class Gateway {
         console.log(`[Gateway] Created new session "${session.name}" (${session.id}) for ${sender}`);
       }
 
+      // ── Directory creation confirmation ──
+      if (this.pendingDirectoryCreate) {
+        await this.handlePendingDirectoryCreate(channel, msg, session, prompt);
+        return;
+      }
+
       // ── Working directory setup gate ──
       // If we're waiting for the user to provide a directory path, treat this message as the path.
       if (this.awaitingDirectory) {
@@ -505,14 +521,30 @@ export class Gateway {
         return;
       }
 
-      // If the session has no working directory yet, ask the user to provide one.
+      // If the session has no working directory, or the directory no longer exists, ask for one.
+      if (session.workingDirectory) {
+        const dirExists = await access(session.workingDirectory).then(() => true, () => false);
+        if (!dirExists) {
+          const oldDir = session.workingDirectory;
+          session.workingDirectory = undefined;
+          await this.sessionStore.setWorkingDirectory(SESSION_KEY, session.id, undefined);
+          this.awaitingDirectory = true;
+          await channel.sendMessage(msg.senderId, [
+            `The working directory no longer exists:`,
+            oldDir,
+            "",
+            "Please provide a new working directory path.",
+            "Send the full path (e.g. C:\\Projects\\MyApp or /home/user/myapp).",
+          ].join("\n"));
+          return;
+        }
+      }
       if (!session.workingDirectory) {
         this.awaitingDirectory = true;
         await channel.sendMessage(msg.senderId, [
           "Before we start, please provide a working directory path for this session.",
           "",
           "Send the full path (e.g. C:\\Projects\\MyApp or /home/user/myapp).",
-          "The folder will be created if it doesn't exist.",
         ].join("\n"));
         return;
       }
@@ -588,8 +620,8 @@ export class Gateway {
   }
 
   /**
-   * Validate the path the user sent, create the directory if needed,
-   * and store it on the session.
+   * Validate the path the user sent. If the directory exists, apply it.
+   * If it doesn't, ask the user whether to create it.
    */
   private async applyWorkingDirectory(
     channel: IChannel,
@@ -606,28 +638,86 @@ export class Gateway {
 
     const resolvedPath = isAbsolute(trimmedPath) ? resolve(trimmedPath) : resolve(process.cwd(), trimmedPath);
 
-    try {
-      await mkdir(resolvedPath, { recursive: true });
+    const exists = await access(resolvedPath).then(() => true, () => false);
 
-      // Ensure the temp in/out sub-folders exist
+    if (!exists) {
+      this.pendingDirectoryCreate = resolvedPath;
+      await this.reply(channel, msg.senderId, [
+        `The folder does not exist:`,
+        `${resolvedPath}`,
+        "",
+        `Would you like to create it? (yes/no)`,
+      ].join("\n"), [
+        [{ label: "✅ Yes, create it", callbackData: "yes" }, { label: "❌ No", callbackData: "no" }],
+      ]);
+      return;
+    }
+
+    await this.commitWorkingDirectory(channel, msg, session, resolvedPath, true);
+  }
+
+  /**
+   * Handle the user's yes/no response to the pending directory creation prompt.
+   */
+  private async handlePendingDirectoryCreate(
+    channel: IChannel,
+    msg: ChannelMessage,
+    session: SessionEntry,
+    answer: string,
+  ): Promise<void> {
+    const resolvedPath = this.pendingDirectoryCreate!;
+    const normalized = answer.trim().toLowerCase();
+
+    if (normalized === "yes" || normalized === "y") {
+      this.pendingDirectoryCreate = null;
+      try {
+        await mkdir(resolvedPath, { recursive: true });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        await channel.sendMessage(msg.senderId, `Failed to create directory:\n${errMsg}\n\nPlease send a different path.`);
+        return;
+      }
+      await this.commitWorkingDirectory(channel, msg, session, resolvedPath, this.awaitingDirectory);
+    } else if (normalized === "no" || normalized === "n") {
+      this.pendingDirectoryCreate = null;
+      await channel.sendMessage(msg.senderId, "OK, directory not created. Please send a different path.");
+    } else {
+      await this.reply(channel, msg.senderId, `Please reply yes or no. Create folder?\n${resolvedPath}`, [
+        [{ label: "✅ Yes, create it", callbackData: "yes" }, { label: "❌ No", callbackData: "no" }],
+      ]);
+    }
+  }
+
+  /**
+   * Finalize the working directory — ensure temp folders exist, persist on session,
+   * and optionally inject instructions.
+   */
+  private async commitWorkingDirectory(
+    channel: IChannel,
+    msg: ChannelMessage,
+    session: SessionEntry,
+    resolvedPath: string,
+    injectInstructions: boolean,
+  ): Promise<void> {
+    try {
       await mkdir(this.inDir(resolvedPath), { recursive: true });
       await mkdir(this.outDir(resolvedPath), { recursive: true });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      await channel.sendMessage(msg.senderId, `Failed to create directory:\n${errMsg}\n\nPlease send a valid path.`);
+      await channel.sendMessage(msg.senderId, `Failed to create temp directories:\n${errMsg}`);
       return;
     }
 
-    // Persist on the session
     await this.sessionStore.setWorkingDirectory(SESSION_KEY, session.id, resolvedPath);
     session.workingDirectory = resolvedPath;
     this.awaitingDirectory = false;
 
     console.log(`[Gateway] Working directory set to: ${resolvedPath}`);
 
-    // Inject instructions into the fresh session now that we have a cwd
-    this.instructedSessions.add(session.id);
-    await this.injectInstructions(session);
+    if (injectInstructions) {
+      this.instructedSessions.add(session.id);
+      await this.injectInstructions(session);
+    }
 
     await channel.sendMessage(msg.senderId, [
       `Working directory set to:\n${resolvedPath}`,
@@ -755,13 +845,27 @@ export class Gateway {
 
     const resolvedPath = isAbsolute(arg) ? resolve(arg) : resolve(process.cwd(), arg);
 
+    const exists = await access(resolvedPath).then(() => true, () => false);
+
+    if (!exists) {
+      this.pendingDirectoryCreate = resolvedPath;
+      await this.reply(channel, msg.senderId, [
+        `The folder does not exist:`,
+        `${resolvedPath}`,
+        "",
+        `Would you like to create it? (yes/no)`,
+      ].join("\n"), [
+        [{ label: "✅ Yes, create it", callbackData: "yes" }, { label: "❌ No", callbackData: "no" }],
+      ]);
+      return;
+    }
+
     try {
-      await mkdir(resolvedPath, { recursive: true });
       await mkdir(this.inDir(resolvedPath), { recursive: true });
       await mkdir(this.outDir(resolvedPath), { recursive: true });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      await channel.sendMessage(msg.senderId, `Failed to create directory:\n${errMsg}`);
+      await channel.sendMessage(msg.senderId, `Failed to create temp directories:\n${errMsg}`);
       return;
     }
 

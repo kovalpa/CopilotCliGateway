@@ -1,3 +1,15 @@
+/**
+ * Normalize a Windows path to forward slashes so that Node's child_process
+ * APIs work reliably when the path is used as `cwd` in spawn/execFile.
+ *
+ * On Windows (especially under Git Bash / MSYS2), backslash paths passed
+ * as `cwd` cause ENOENT even though the directory exists.  Forward slashes
+ * work fine for both the cwd and the command lookup via PATH.
+ */
+export function normalizePath(p: string | undefined): string | undefined {
+  return p?.replace(/\\/g, "/");
+}
+
 export interface CopilotResponse {
   text: string;
   model: string | null;

@@ -1,5 +1,5 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
-import type { ICopilotBackend, CopilotResponse, PermissionsMode, ProgressCallback } from "./copilot-backend.js";
+import { normalizePath, type ICopilotBackend, type CopilotResponse, type PermissionsMode, type ProgressCallback } from "./copilot-backend.js";
 
 export type { CopilotResponse, PermissionsMode, ProgressCallback };
 
@@ -181,7 +181,6 @@ export class CopilotCliService implements ICopilotBackend {
     return new Promise((resolve, reject) => {
       const permArgs = this.buildPermissionArgs();
 
-      const command = this.useGh ? "gh" : "copilot";
       const args = [
         ...(this.useGh ? ["copilot"] : []),
         "-p",
@@ -192,13 +191,15 @@ export class CopilotCliService implements ICopilotBackend {
         ...this.additionalArgs,
       ];
 
+      const command = this.useGh ? "gh" : "copilot";
+
       console.log(`[Copilot] Executing: ${command} ${args.join(" ").slice(0, 120)}...`);
 
       const child: ChildProcess = spawn(command, args, {
         shell: false,
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
-        cwd: cwd ?? this.workingDirectory,
+        cwd: normalizePath(cwd ?? this.workingDirectory),
         env: { ...process.env },
       });
 

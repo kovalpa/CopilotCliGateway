@@ -12,7 +12,7 @@ import {
   type WriteTextFileRequest,
   type WriteTextFileResponse,
 } from "@agentclientprotocol/sdk";
-import type { ICopilotBackend, CopilotResponse, PermissionsMode, ProgressCallback } from "./copilot-backend.js";
+import { normalizePath, type ICopilotBackend, type CopilotResponse, type PermissionsMode, type ProgressCallback } from "./copilot-backend.js";
 
 export interface CopilotAcpOptions {
   timeout: number;
@@ -66,12 +66,13 @@ export class CopilotAcpService implements ICopilotBackend {
   async start(): Promise<void> {
     if (this.connection) return;
 
-    const command = this.useGh ? "gh" : "copilot";
     const args = [
       ...(this.useGh ? ["copilot", "--"] : []),
       "--acp",
       ...this.additionalArgs,
     ];
+
+    const command = this.useGh ? "gh" : "copilot";
 
     console.log(`[ACP] Starting: ${command} ${args.join(" ")}`);
 
@@ -79,7 +80,7 @@ export class CopilotAcpService implements ICopilotBackend {
       shell: false,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
-      cwd: this.workingDirectory,
+      cwd: normalizePath(this.workingDirectory),
       env: { ...process.env },
     });
 
@@ -253,7 +254,7 @@ export class CopilotAcpService implements ICopilotBackend {
     const existing = this.acpSessions.get(gatewaySessionId);
     if (existing) return existing;
 
-    const workDir = cwd ?? this.workingDirectory ?? process.cwd();
+    const workDir = normalizePath(cwd ?? this.workingDirectory ?? process.cwd())!;
 
     // Try to restore a previous session from disk (survives gateway restarts)
     if (storedAcpSessionId) {

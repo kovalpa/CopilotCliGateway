@@ -102,7 +102,7 @@ export class SessionStore {
     return match;
   }
 
-  async setWorkingDirectory(senderId: string, sessionId: string, dir: string): Promise<void> {
+  async setWorkingDirectory(senderId: string, sessionId: string, dir: string | undefined): Promise<void> {
     const user = this.data[senderId];
     if (!user) return;
     const session = user.sessions.find((s) => s.id === sessionId);
