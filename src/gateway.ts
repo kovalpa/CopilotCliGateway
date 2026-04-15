@@ -76,6 +76,7 @@ export class Gateway {
   private readonly openaiConfig: OpenAIConfig;
   private readonly sessionStore: SessionStore;
   private readonly backendType: BackendType;
+  private readonly showStats: boolean;
   private availableModels: string[] = [];
   private instructions: string | null = null;
   /** Tracks whether the gateway is waiting for the user to provide a working directory. */
@@ -98,6 +99,7 @@ export class Gateway {
     openaiConfig?: OpenAIConfig,
     sessionStore?: SessionStore,
     backendType: BackendType = "cli",
+    showStats = true,
   ) {
     this.channels = channels;
     this.copilot = copilot;
@@ -105,6 +107,7 @@ export class Gateway {
     this.openaiConfig = openaiConfig ?? { apiKey: "", whisperModel: "whisper-1", language: "" };
     this.sessionStore = sessionStore!;
     this.backendType = backendType;
+    this.showStats = showStats;
   }
 
   /** Resolve the input (upload) directory: %TEMP%/in_<projectFolderName> */
@@ -160,7 +163,17 @@ export class Gateway {
       if (dirExists) {
         console.log(`[Gateway] Resuming session "${existingSession.name}" — injecting instructions...`);
         this.instructedSessions.add(existingSession.id);
-        await this.injectInstructions(existingSession);
+        const ok = await this.injectInstructions(existingSession);
+        if (!ok) {
+          // Session is likely stale/expired — create a fresh one with the same working directory
+          console.log("[Gateway] Creating fresh session after failed resume...");
+          const wd = existingSession.workingDirectory;
+          const fresh = await this.sessionStore.createSession(SESSION_KEY, undefined, this.backendType);
+          await this.sessionStore.setWorkingDirectory(SESSION_KEY, fresh.id, wd);
+          fresh.workingDirectory = wd;
+          this.instructedSessions.add(fresh.id);
+          await this.injectInstructions(fresh);
+        }
       } else {
         console.warn(`[Gateway] Working directory no longer exists: ${existingSession.workingDirectory}`);
         existingSession.workingDirectory = undefined;
@@ -185,13 +198,35 @@ export class Gateway {
     return this.instructions || null;
   }
 
+  /** Load cli-instructions.md from the project's working directory (if it exists). */
+  private async loadCliInstructions(workingDirectory: string): Promise<string | null> {
+    const cliInstructionsPath = join(workingDirectory, "cli-instructions.md");
+    try {
+      return (await readFile(cliInstructionsPath, "utf-8")).trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Send the contents of instructions.md as the first message in a session
    * so the agent has context about the gateway environment.
    */
-  private async injectInstructions(session: SessionEntry): Promise<void> {
+  private async injectInstructions(session: SessionEntry): Promise<boolean> {
     let text = await this.loadInstructions();
-    if (!text) return;
+
+    // Merge cli-instructions.md from the working directory if present
+    if (session.workingDirectory) {
+      const cliInstructions = await this.loadCliInstructions(session.workingDirectory);
+      if (cliInstructions) {
+        text = text
+          ? `${text}\n\n---\n\n${cliInstructions}`
+          : cliInstructions;
+        console.log("[Gateway] Merged cli-instructions.md from working directory.");
+      }
+    }
+
+    if (!text) return true;
 
     // Append actual temp folder paths so the agent knows where to read/write files
     if (session.workingDirectory) {
@@ -212,8 +247,10 @@ export class Gateway {
         this.pendingRejectedTools.push(...response.rejectedTools);
       }
       console.log("[Gateway] Instructions injected successfully.");
+      return true;
     } catch (err) {
       console.error("[Gateway] Failed to inject instructions:", err);
+      return false;
     } finally {
       this.copilotInitializing = false;
     }
@@ -316,7 +353,7 @@ export class Gateway {
         "/folder — show current working directory",
         "/folder <path> — change working directory",
         "",
-        "/instructions — re-inject instructions.md into current session",
+        "/instructions — re-inject instructions.md and cli-instructions.md into current session",
         "",
         "/stop — abort the currently running Copilot process",
         "",
@@ -561,7 +598,9 @@ export class Gateway {
       // Build progress callback for CLI backend (ACP streams natively)
       const onProgress = this.backendType === "cli"
         ? (delta: string) => {
-            channel.sendMessage(msg.senderId, delta).catch((err) => {
+            const progressModel = this.copilot.model ?? "processing";
+            const progressHeader = `[ Copilot CLI - ${progressModel} ]`;
+            channel.sendMessage(msg.senderId, `${progressHeader}\n\n${delta}`).catch((err) => {
               console.error(`[Gateway] Failed to send progress update: ${err}`);
             });
           }
@@ -583,9 +622,14 @@ export class Gateway {
       this.pendingRejectedTools = [];
 
       // Build response with header
-      const modelTag = response.model ?? "unknown";
+      const modelTag = this.copilot.model ?? "default";
       const header = `[ Copilot CLI - ${modelTag} ]`;
-      let fullResponse = `${header}\n\n${response.text}`;
+      let fullResponse = header;
+
+      // Append response text if present (skip empty filler)
+      if (response.text.trim()) {
+        fullResponse += `\n\n${response.text}`;
+      }
 
       if (allRejected.length > 0) {
         const unique = [...new Set(allRejected)];
@@ -595,6 +639,11 @@ export class Gateway {
 
       console.log(`[Gateway] [${channel.name}] Responding to ${sender} (${response.text.length} chars, model: ${modelTag})`);
       await channel.sendMessage(msg.senderId, fullResponse);
+
+      // Send CLI stats as a separate footer message (like the terminal does)
+      if (this.showStats && response.stats) {
+        await channel.sendMessage(msg.senderId, response.stats);
+      }
 
       // Send any output files the agent saved during this call
       await this.sendOutputFiles(channel, msg.senderId, session.workingDirectory);
@@ -800,9 +849,13 @@ export class Gateway {
     // Force re-read from disk so edits are picked up
     this.instructions = null;
 
-    const text = await this.loadInstructions();
-    if (!text) {
-      await channel.sendMessage(msg.senderId, "No instructions.md found.");
+    const baseText = await this.loadInstructions();
+    const cliText = session.workingDirectory
+      ? await this.loadCliInstructions(session.workingDirectory)
+      : null;
+
+    if (!baseText && !cliText) {
+      await channel.sendMessage(msg.senderId, "No instructions.md or cli-instructions.md found.");
       return;
     }
 

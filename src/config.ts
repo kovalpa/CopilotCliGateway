@@ -18,6 +18,8 @@ export interface CopilotConfig {
   backend: "cli" | "acp";
   /** Interval in seconds to send stdout progress updates to the user. 0 disables. Defaults to 60. */
   stdoutIntervalSeconds: number;
+  /** Show CLI stats (tokens, requests, changes) after each response. Defaults to true. */
+  showStats: boolean;
 }
 
 export interface OpenAIConfig {
@@ -58,6 +60,7 @@ const DEFAULT_CONFIG: GatewayConfig = {
     useGh: false,
     backend: "cli",
     stdoutIntervalSeconds: 60,
+    showStats: true,
   },
   openai: {
     apiKey: "",

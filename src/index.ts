@@ -108,7 +108,7 @@ async function main(): Promise<void> {
   await sessionStore.load();
   console.log("[Gateway] Session store loaded.");
 
-  const gateway = new Gateway(channels, copilot, mcpServers, config.openai, sessionStore, backendType);
+  const gateway = new Gateway(channels, copilot, mcpServers, config.openai, sessionStore, backendType, config.copilot.showStats);
 
   // Graceful shutdown
   const shutdown = async () => {

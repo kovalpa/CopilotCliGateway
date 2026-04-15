@@ -13,6 +13,8 @@ export function normalizePath(p: string | undefined): string | undefined {
 export interface CopilotResponse {
   text: string;
   model: string | null;
+  /** Stats block from CLI stderr (Tokens, Requests, Changes lines). */
+  stats?: string;
   /** ACP session ID (returned by ACP backend so the gateway can persist it). */
   acpSessionId?: string;
   /** Tool names that were rejected during this execution (ACP ask mode). */

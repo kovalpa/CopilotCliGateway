@@ -1,4 +1,7 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { normalizePath, type ICopilotBackend, type CopilotResponse, type PermissionsMode, type ProgressCallback } from "./copilot-backend.js";
 
 export type { CopilotResponse, PermissionsMode, ProgressCallback };
@@ -19,12 +22,22 @@ function stripAnsi(text: string): string {
   return text.replace(ANSI_REGEX, "");
 }
 
-function extractModel(stderr: string): string | null {
-  // Copilot CLI outputs lines like: " claude-opus-4.6  21.4k in, 17 out"
-  const match = stderr.match(/^\s+([\w.-]+)\s+[\d.]+k?\s+in,/m);
-  return match?.[1] ?? null;
-}
 
+
+/**
+ * Read the current model from ~/.copilot/config.json (if configured).
+ * Returns null if no model is explicitly set (Copilot uses its server default).
+ */
+async function detectConfiguredModel(): Promise<string | null> {
+  try {
+    const configPath = join(homedir(), ".copilot", "config.json");
+    const raw = await readFile(configPath, "utf-8");
+    const config = JSON.parse(raw);
+    return typeof config.model === "string" ? config.model : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Fetch the list of available models by parsing `copilot help config`.
@@ -75,9 +88,19 @@ export class CopilotCliService implements ICopilotBackend {
     this.stdoutIntervalSeconds = options.stdoutIntervalSeconds ?? 60;
   }
 
-  // ── lifecycle (no-op for CLI mode) ──
+  // ── lifecycle ──
 
-  async start(): Promise<void> {}
+  async start(): Promise<void> {
+    // Detect the configured model from ~/.copilot/config.json if not already set
+    if (!this._model) {
+      const detected = await detectConfiguredModel();
+      if (detected) {
+        this._model = detected;
+        console.log(`[Copilot] Detected configured model: ${detected}`);
+      }
+    }
+  }
+
   async stop(): Promise<void> { this.abort(); }
 
   // ── model ──
@@ -248,11 +271,18 @@ export class CopilotCliService implements ICopilotBackend {
         reject(new Error(`Failed to start Copilot CLI: ${err.message}`));
       });
 
-      // Use "exit" instead of "close" — "close" waits for ALL stdio streams
-      // to close, which can be delayed if child processes (e.g. Playwright MCP
-      // servers, browser instances) keep them open after Copilot itself finishes.
-      // "exit" fires as soon as the main process exits.
-      child.on("exit", (code, signal) => {
+      // We need both "exit" (for code/signal) and stderr "end" (for complete
+      // stderr data) before resolving.  "close" waits for ALL stdio which can
+      // hang if MCP child processes keep stdout open, so we track stderr
+      // independently with a safety timeout.
+      let exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+      let stderrDone = false;
+      let resolved = false;
+
+      const tryResolve = () => {
+        if (resolved || !exitInfo || !stderrDone) return;
+        resolved = true;
+
         clearTimeout(timeoutHandle);
         if (progressHandle) clearInterval(progressHandle);
         this._activeChild = null;
@@ -261,13 +291,13 @@ export class CopilotCliService implements ICopilotBackend {
         child.stdout?.removeAllListeners();
         child.stderr?.removeAllListeners();
 
-        // Process timed out
+        const { code, signal } = exitInfo;
+
         if (timedOut) {
           reject(new Error(`Copilot CLI timed out after ${Math.round(this.timeout / 1000)} seconds.`));
           return;
         }
 
-        // Process was killed (abort via /stop)
         if (signal === "SIGTERM" || signal === "SIGKILL") {
           reject(new Error("ABORTED"));
           return;
@@ -279,16 +309,35 @@ export class CopilotCliService implements ICopilotBackend {
           return;
         }
 
-        // If progress updates were sent, only return the remaining unsent portion
         const remaining = lastSentIndex > 0 ? stdout.slice(lastSentIndex) : stdout;
         const text = stripAnsi(remaining).trim();
-        const model = extractModel(stripAnsi(stderr));
+        // Pass raw stderr as stats — the gateway sends it as a separate message
+        const rawStats = stripAnsi(stderr).trim() || undefined;
 
         if (!text && lastSentIndex === 0) {
-          resolve({ text: "(No response from Copilot CLI)", model });
+          resolve({ text: "(No response from Copilot CLI)", model: null, stats: rawStats });
         } else {
-          resolve({ text: text || "(No additional output)", model });
+          resolve({ text: text || "", model: null, stats: rawStats });
         }
+      };
+
+      child.stderr!.on("end", () => {
+        stderrDone = true;
+        tryResolve();
+      });
+
+      child.on("exit", (code, signal) => {
+        exitInfo = { code, signal };
+        // Safety: if stderr "end" doesn't fire within 2s (e.g. lingering
+        // child processes keeping the pipe open), resolve anyway.
+        setTimeout(() => {
+          if (!stderrDone) {
+            console.log("[Copilot] stderr did not close in time, resolving with partial data.");
+            stderrDone = true;
+            tryResolve();
+          }
+        }, 2000);
+        tryResolve();
       });
 
       child.stdin?.end();
