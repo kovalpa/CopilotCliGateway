@@ -1,6 +1,6 @@
 import { rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { loadConfig } from "./config.js";
+import { loadConfig, saveConfig } from "./config.js";
 import type { ICopilotBackend } from "./services/copilot-backend.js";
 import { CopilotCliService } from "./services/copilot-cli.js";
 import { CopilotAcpService } from "./services/copilot-acp.js";
@@ -43,6 +43,13 @@ async function main(): Promise<void> {
   const backendType = config.copilot.backend ?? "cli";
   let copilot: ICopilotBackend;
 
+  const backendStateOptions = {
+    model: config.copilot.model || null,
+    permissions: config.copilot.permissions.mode,
+    allowedTools: config.copilot.tools.allowed,
+    deniedTools: config.copilot.tools.denied,
+  };
+
   if (backendType === "acp") {
     console.log("[Gateway] Using ACP backend (persistent Agent Client Protocol server).");
     copilot = new CopilotAcpService({
@@ -50,6 +57,7 @@ async function main(): Promise<void> {
       additionalArgs: config.copilot.additionalArgs,
       workingDirectory: config.copilot.workingDirectory,
       useGh: config.copilot.useGh,
+      ...backendStateOptions,
     });
   } else {
     console.log("[Gateway] Using CLI backend (spawn per request).");
@@ -59,6 +67,7 @@ async function main(): Promise<void> {
       workingDirectory: config.copilot.workingDirectory,
       useGh: config.copilot.useGh,
       stdoutIntervalSeconds: config.copilot.stdoutIntervalSeconds,
+      ...backendStateOptions,
     });
   }
 
@@ -108,7 +117,22 @@ async function main(): Promise<void> {
   await sessionStore.load();
   console.log("[Gateway] Session store loaded.");
 
-  const gateway = new Gateway(channels, copilot, mcpServers, config.openai, sessionStore, backendType, config.copilot.showStats);
+  // Persist backend state (selected model, permissions mode, allow/deny lists)
+  // back to config.json whenever the gateway mutates them via /model,
+  // /permissions, /allow, /deny, or /allow reset.
+  const persistBackendState = async (): Promise<void> => {
+    config.copilot.model = copilot.selectedModel ?? "";
+    config.copilot.permissions.mode = copilot.permissions;
+    config.copilot.tools.allowed = [...copilot.allowedTools];
+    config.copilot.tools.denied = [...copilot.deniedTools];
+    try {
+      await saveConfig(config);
+    } catch (err) {
+      console.error("[Gateway] Failed to persist backend state to config.json:", err);
+    }
+  };
+
+  const gateway = new Gateway(channels, copilot, mcpServers, config.openai, sessionStore, backendType, config.copilot.showStats, persistBackendState);
 
   // Graceful shutdown
   const shutdown = async () => {

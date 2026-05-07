@@ -19,6 +19,14 @@ export interface CopilotAcpOptions {
   additionalArgs: string[];
   workingDirectory?: string;
   useGh?: boolean;
+  /** Initial user-selected model. Null = use Copilot's default. */
+  model?: string | null;
+  /** Initial permission mode (defaults to "ask"). */
+  permissions?: PermissionsMode;
+  /** Initial allowed tools (used when permissions mode is "ask"). */
+  allowedTools?: string[];
+  /** Initial denied tools (always enforced, takes precedence over allowed). */
+  deniedTools?: string[];
 }
 
 /**
@@ -59,6 +67,10 @@ export class CopilotAcpService implements ICopilotBackend {
     this.additionalArgs = options.additionalArgs;
     this.useGh = options.useGh ?? false;
     this.workingDirectory = options.workingDirectory || undefined;
+    if (options.model) this._model = options.model;
+    if (options.permissions) this._permissions = options.permissions;
+    if (options.allowedTools) this._allowedTools = [...options.allowedTools];
+    if (options.deniedTools) this._deniedTools = [...options.deniedTools];
   }
 
   // ── lifecycle ──
@@ -293,8 +305,14 @@ export class CopilotAcpService implements ICopilotBackend {
 
   // ── model ──
 
-  get model(): string | null { return this._model; }
+  get model(): string | null {
+    // User override takes precedence; otherwise fall back to whatever the
+    // ACP server reported via newSession / loadSession / setSessionModel.
+    return this._model ?? this._reportedModel;
+  }
   set model(value: string | null) { this._model = value; }
+  /** Only the user override — excludes server-reported fallback so persistence doesn't pin observed defaults. */
+  get selectedModel(): string | null { return this._model; }
 
   // ── permissions ──
 

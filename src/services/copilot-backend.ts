@@ -50,8 +50,11 @@ export interface ICopilotBackend {
 
   // ── model ──
 
+  /** The effective model name (user override if set, otherwise the auto-detected value). Used for display. */
   get model(): string | null;
   set model(value: string | null);
+  /** The user-selected model only (ignores auto-detected fallback). Used for persistence so we don't pin observed defaults. */
+  get selectedModel(): string | null;
 
   // ── permissions ──
 

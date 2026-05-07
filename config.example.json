@@ -17,8 +17,19 @@
   "copilot": {
     "timeout": 2400000,
     "additionalArgs": [],
+    "workingDirectory": "",
     "useGh": false,
-    "stdoutIntervalSeconds": 60
+    "backend": "cli",
+    "stdoutIntervalSeconds": 60,
+    "showStats": true,
+    "model": "",
+    "permissions": {
+      "mode": "ask"
+    },
+    "tools": {
+      "allowed": [],
+      "denied": []
+    }
   },
   "openai": {
     "apiKey": "",

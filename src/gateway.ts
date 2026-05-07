@@ -77,6 +77,8 @@ export class Gateway {
   private readonly sessionStore: SessionStore;
   private readonly backendType: BackendType;
   private readonly showStats: boolean;
+  /** Persist permissions + tool lists to config.json. Invoked after mutations. No-op if not supplied. */
+  private readonly persistBackendState: () => Promise<void>;
   private availableModels: string[] = [];
   private instructions: string | null = null;
   /** Tracks whether the gateway is waiting for the user to provide a working directory. */
@@ -100,6 +102,7 @@ export class Gateway {
     sessionStore?: SessionStore,
     backendType: BackendType = "cli",
     showStats = true,
+    persistBackendState: () => Promise<void> = async () => {},
   ) {
     this.channels = channels;
     this.copilot = copilot;
@@ -108,6 +111,7 @@ export class Gateway {
     this.sessionStore = sessionStore!;
     this.backendType = backendType;
     this.showStats = showStats;
+    this.persistBackendState = persistBackendState;
   }
 
   /** Resolve the input (upload) directory: %TEMP%/in_<projectFolderName> */
@@ -966,6 +970,7 @@ export class Gateway {
     if (requestedModel === "default") {
       this.copilot.model = null;
       console.log(`[Gateway] Model reset to CLI default`);
+      await this.persistBackendState();
       await this.reply(channel, msg.senderId, "Model reset to CLI default.", [
         [{ label: "📋 Model", callbackData: "/model" }, { label: "📋 Menu", callbackData: "/help" }],
       ]);
@@ -993,6 +998,7 @@ export class Gateway {
 
     this.copilot.model = requestedModel;
     console.log(`[Gateway] Model changed to: ${requestedModel}`);
+    await this.persistBackendState();
     await this.reply(channel, msg.senderId, `Model changed to: ${requestedModel}`, [
       [{ label: "📋 Model", callbackData: "/model" }, { label: "📋 Menu", callbackData: "/help" }],
     ]);
@@ -1061,6 +1067,7 @@ export class Gateway {
 
     this.copilot.permissions = requestedMode as PermissionsMode;
     console.log(`[Gateway] Permissions mode changed to: ${requestedMode}`);
+    await this.persistBackendState();
     await this.reply(channel, msg.senderId, `Permissions mode changed to: ${requestedMode}`, [
       [{ label: "🔐 Permissions", callbackData: "/permissions" }, { label: "📋 Menu", callbackData: "/help" }],
     ]);
@@ -1113,6 +1120,7 @@ export class Gateway {
     if (arg === "reset") {
       this.copilot.resetToolLists();
       console.log(`[Gateway] Tool allow/deny lists cleared`);
+      await this.persistBackendState();
       await this.reply(channel, msg.senderId, "Tool allow/deny lists cleared.", [
         [{ label: "✅ Allow", callbackData: "/allow" }, { label: "📋 Menu", callbackData: "/help" }],
       ]);
@@ -1121,6 +1129,7 @@ export class Gateway {
 
     this.copilot.addAllowedTool(arg);
     console.log(`[Gateway] Tool allowed: ${arg}`);
+    await this.persistBackendState();
     await this.reply(channel, msg.senderId, `✅ Tool allowed: ${arg}`, [
       [{ label: "✅ Allow", callbackData: "/allow" }, { label: "📋 Menu", callbackData: "/help" }],
     ]);
@@ -1170,6 +1179,7 @@ export class Gateway {
 
     this.copilot.addDeniedTool(arg);
     console.log(`[Gateway] Tool denied: ${arg}`);
+    await this.persistBackendState();
     await this.reply(channel, msg.senderId, `❌ Tool denied: ${arg}`, [
       [{ label: "❌ Deny", callbackData: "/deny" }, { label: "📋 Menu", callbackData: "/help" }],
     ]);
