@@ -1,4 +1,4 @@
-import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -66,14 +66,43 @@ function parseModelList(output: string): string[] {
 
 function tryFetchModels(command: string, args: string[]): Promise<string[]> {
   return new Promise((resolve) => {
-    execFile(command, args, {
-      timeout: 15_000,
-      maxBuffer: 10 * 1024 * 1024,
+    // Use spawn with stdin "ignore" — execFile leaves stdin as a pipe, which
+    // causes `gh`/`copilot` to hang on Windows (presumably waiting for input
+    // when their stdin isn't a TTY but is open). Closing stdin makes them
+    // print and exit immediately.
+    const child = spawn(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
-    }, (err, stdout, stderr) => {
-      if (err) {
-        const errCode = (err as NodeJS.ErrnoException).code;
-        console.warn(`[Gateway] '${command} ${args.join(" ")}' failed: ${err.message} (code=${errCode ?? "?"})`);
+      shell: false,
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGTERM"); } catch { /* already dead */ }
+    }, 15_000);
+
+    child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+    child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+
+    child.on("error", (err) => {
+      clearTimeout(timeout);
+      console.warn(`[Gateway] '${command} ${args.join(" ")}' spawn error: ${err.message}`);
+      resolve([]);
+    });
+
+    child.on("close", (code, signal) => {
+      clearTimeout(timeout);
+      if (timedOut) {
+        console.warn(`[Gateway] '${command} ${args.join(" ")}' timed out.`);
+        resolve([]);
+        return;
+      }
+      if (code !== 0) {
+        console.warn(`[Gateway] '${command} ${args.join(" ")}' exited code=${code}, signal=${signal}`);
         if (stderr) console.warn(`[Gateway]   stderr: ${stderr.slice(0, 400).trim()}`);
         if (stdout) console.warn(`[Gateway]   stdout: ${stdout.slice(0, 400).trim()}`);
         resolve([]);
